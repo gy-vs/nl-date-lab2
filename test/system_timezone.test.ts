@@ -135,6 +135,71 @@ test("Test - Timezone difference on written date", function () {
     });
 });
 
+test("Test - DST-dependent reference timezone is resolved at the mentioned date", function () {
+    // US spring forward: 2024-03-10 at 02:00 local time.
+    // The reference (Saturday noon) is still standard time, but the mentioned Sunday is DST.
+    const springRef = { instant: new Date("2024-03-09T17:00:00Z"), timezone: "ET" };
+
+    testSingleCase(chrono, "tomorrow at 10am", springRef, (result) => {
+        expect(result).toBeDate(new Date("2024-03-10T14:00:00Z"));
+    });
+
+    testSingleCase(chrono, "March 10, 2024 10am", springRef, (result) => {
+        expect(result).toBeDate(new Date("2024-03-10T14:00:00Z"));
+    });
+
+    testSingleCase(chrono, "Sunday 9am", springRef, (result) => {
+        expect(result).toBeDate(new Date("2024-03-10T13:00:00Z"));
+    });
+
+    // US fall back: 2024-11-03 at 02:00 local time. The reference (Saturday noon) is still DST.
+    const fallRef = { instant: new Date("2024-11-02T17:00:00Z"), timezone: "ET" };
+
+    testSingleCase(chrono, "tomorrow at 10am", fallRef, (result) => {
+        expect(result).toBeDate(new Date("2024-11-03T15:00:00Z"));
+    });
+
+    // Europe fall back: 2024-10-27 at 03:00 local time.
+    const europeFallRef = { instant: new Date("2024-10-26T17:00:00Z"), timezone: "CET" };
+
+    testSingleCase(chrono, "tomorrow 10am", europeFallRef, (result) => {
+        expect(result).toBeDate(new Date("2024-10-27T09:00:00Z"));
+    });
+});
+
+test("Test - Durations keep the reference instant offset across DST", function () {
+    const springRef = { instant: new Date("2024-03-09T17:00:00Z"), timezone: "ET" };
+
+    // "in 2 days" is a calendar-day duration: both running modes agreed on it before the fix.
+    testSingleCase(chrono, "in 2 days", springRef, (result) => {
+        expect(result).toBeDate(new Date("2024-03-11T17:00:00Z"));
+    });
+
+    // "in 3 hours" is an elapsed duration and must not jump with the clock change.
+    testSingleCase(chrono, "in 3 hours", { instant: new Date("2024-03-10T03:00:00Z"), timezone: "ET" }, (result) => {
+        expect(result).toBeDate(new Date("2024-03-10T06:00:00Z"));
+    });
+});
+
+test("Test - Fixed/numeric reference timezones are unaffected by DST dates", function () {
+    const springRef = { instant: new Date("2024-03-09T17:00:00Z"), timezone: -300 };
+
+    testSingleCase(chrono, "tomorrow at 10am", springRef, (result) => {
+        expect(result).toBeDate(new Date("2024-03-10T15:00:00Z"));
+    });
+
+    // A fixed custom abbreviation definition is used as-is on both sides of the transition.
+    testSingleCase(
+        chrono,
+        "tomorrow at 10am",
+        { instant: new Date("2024-03-09T17:00:00Z"), timezone: "ET" },
+        { timezones: { ET: -200 } },
+        (result) => {
+            expect(result).toBeDate(new Date("2024-03-10T13:20:00Z"));
+        }
+    );
+});
+
 test("Test - Precise [now] mentioned", function () {
     const refDate = new Date("Sat Mar 13 2021 14:22:14 GMT+0900 (Japan Standard Time)");
 

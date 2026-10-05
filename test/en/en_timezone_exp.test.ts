@@ -75,6 +75,76 @@ test("Test - Parsing date/time with GMT offset", function () {
     });
 });
 
+test("Test - Parsing date range with DST-dependent timezone abbreviation", function () {
+    // US spring forward (2024-03-10 02:00 ET): the start is before the transition (EST, -300),
+    // the end is after it (EDT, -240).
+    testSingleCase(
+        chrono,
+        "March 9, 2024 10pm to March 10, 2024 10am ET",
+        new Date("2024-03-01T12:00:00Z"),
+        (result) => {
+            expect(result.start.get("timezoneOffset")).toBe(-5 * 60);
+            expect(result.start).toBeDate(new Date("2024-03-10T03:00:00Z"));
+            expect(result.end.get("timezoneOffset")).toBe(-4 * 60);
+            expect(result.end).toBeDate(new Date("2024-03-10T14:00:00Z"));
+        }
+    );
+
+    // US fall back (2024-11-03 02:00 ET): the start is still DST (EDT, -240),
+    // the end is standard time (EST, -300).
+    testSingleCase(chrono, "Nov 2, 2024 9pm - Nov 3, 2024 9am ET", new Date("2024-09-01T12:00:00Z"), (result) => {
+        expect(result.start.get("timezoneOffset")).toBe(-4 * 60);
+        expect(result.start).toBeDate(new Date("2024-11-03T01:00:00Z"));
+        expect(result.end.get("timezoneOffset")).toBe(-5 * 60);
+        expect(result.end).toBeDate(new Date("2024-11-03T14:00:00Z"));
+    });
+
+    // Europe fall back (2024-10-27 03:00 CET): CEST (+120) before, CET (+60) after.
+    testSingleCase(chrono, "Oct 26 2024 20:00 - Oct 27 2024 20:00 CET", new Date("2024-09-01T12:00:00Z"), (result) => {
+        expect(result.start.get("timezoneOffset")).toBe(2 * 60);
+        expect(result.start).toBeDate(new Date("2024-10-26T18:00:00Z"));
+        expect(result.end.get("timezoneOffset")).toBe(60);
+        expect(result.end).toBeDate(new Date("2024-10-27T19:00:00Z"));
+    });
+
+    // Weekday-only range crossing the US spring-forward transition.
+    testSingleCase(chrono, "Saturday 10am to Sunday 10am ET", new Date("2024-03-09T12:00:00Z"), (result) => {
+        expect(result.start.get("timezoneOffset")).toBe(-5 * 60);
+        expect(result.start).toBeDate(new Date("2024-03-09T15:00:00Z"));
+        expect(result.end.get("timezoneOffset")).toBe(-4 * 60);
+        expect(result.end).toBeDate(new Date("2024-03-10T14:00:00Z"));
+    });
+
+    // A fixed-offset abbreviation keeps the same offset on both sides.
+    testSingleCase(
+        chrono,
+        "March 9, 2024 10pm to March 10, 2024 10am EST",
+        new Date("2024-03-01T12:00:00Z"),
+        (result) => {
+            expect(result.start.get("timezoneOffset")).toBe(-5 * 60);
+            expect(result.end.get("timezoneOffset")).toBe(-5 * 60);
+        }
+    );
+
+    // Custom DST-dependent mapping (option.timezones) is re-evaluated per side as well.
+    const customDstTimezone = {
+        timezoneOffsetDuringDst: -120,
+        timezoneOffsetNonDst: -180,
+        dstStart: (year: number) => new Date(year, 2, 31, 2),
+        dstEnd: (year: number) => new Date(year, 9, 27, 3),
+    };
+    testSingleCase(
+        chrono,
+        "March 30, 2024 10pm to March 31, 2024 10am XYZ",
+        new Date("2024-01-01T00:00:00Z"),
+        { timezones: { XYZ: customDstTimezone } },
+        (result) => {
+            expect(result.start.get("timezoneOffset")).toBe(-180);
+            expect(result.end.get("timezoneOffset")).toBe(-120);
+        }
+    );
+});
+
 test("Test - Parsing date/time with timezone abbreviation", function () {
     testSingleCase(chrono, "wednesday, september 16, 2020 at 11 am", (result, text) => {
         expect(result.text).toBe(text);

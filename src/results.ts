@@ -3,13 +3,29 @@ import { Component, ParsedComponents, ParsedResult, ParsingReference, TimezoneAb
 import quarterOfYear from "dayjs/plugin/quarterOfYear";
 import dayjs, { QUnitType } from "dayjs";
 import { assignSimilarDate, assignSimilarTime, implySimilarTime } from "./utils/dates";
-import { toTimezoneOffset } from "./timezone";
+import { isAmbiguousTimezoneAbbreviation, toTimezoneOffset } from "./timezone";
 import { addDuration, Duration, EmptyDuration } from "./calculation/duration";
 dayjs.extend(quarterOfYear);
+
+/**
+ * @internal
+ *
+ * Internal tag marking components whose timezone offset was calculated as an elapsed duration from
+ * the reference instant (e.g. "in 3 hours"). Such components must keep the reference instant's
+ * timezone offset even across a DST transition, instead of resolving the offset at their own date.
+ */
+export const TAG_RELATIVE_TIMEZONE_OFFSET = "result/relativeTimezoneOffset";
 
 export class ReferenceWithTimezone {
     readonly instant: Date;
     readonly timezoneOffset?: number | null;
+
+    /**
+     * The original timezone input (abbreviation) when the reference timezone was given as a string.
+     * Numeric offsets are not retained since they have a constant offset.
+     */
+    private timezoneAbbr?: string;
+    private timezoneOverrides?: TimezoneAbbrMap;
 
     constructor(instant?: Date, timezoneOffset?: number) {
         this.instant = instant ?? new Date();
@@ -26,7 +42,12 @@ export class ReferenceWithTimezone {
         }
         const instant: Date = input?.instant ?? new Date();
         const timezoneOffset = toTimezoneOffset(input?.timezone, instant, timezoneOverrides);
-        return new ReferenceWithTimezone(instant, timezoneOffset);
+        const reference = new ReferenceWithTimezone(instant, timezoneOffset);
+        if (typeof input?.timezone === "string" && input.timezone !== "") {
+            reference.timezoneAbbr = input.timezone;
+            reference.timezoneOverrides = timezoneOverrides;
+        }
+        return reference;
     }
 
     /**
@@ -43,10 +64,22 @@ export class ReferenceWithTimezone {
 
     /**
      * Returns the number minutes difference between the JS date's timezone and the reference timezone.
+     *
+     * When {@link resolveTimezoneAtTargetDate} is set and the reference timezone was given as a
+     * daylight-saving dependent abbreviation (e.g. ET, CET), the offset is determined from the
+     * target date itself instead of the reference instant. This way, a date mentioned after a DST
+     * transition is interpreted with the post-transition offset, just like when parsing on a machine
+     * actually located in that timezone.
+     *
      * @param date
      * @param overrideTimezoneOffset
+     * @param resolveTimezoneAtTargetDate
      */
-    getSystemTimezoneAdjustmentMinute(date?: Date, overrideTimezoneOffset?: number): number {
+    getSystemTimezoneAdjustmentMinute(
+        date?: Date,
+        overrideTimezoneOffset?: number,
+        resolveTimezoneAtTargetDate = false
+    ): number {
         if (!date || date.getTime() < 0) {
             // Javascript date timezone calculation got effect when the time epoch < 0
             // e.g. new Date('Tue Feb 02 1300 00:00:00 GMT+0900 (JST)') => Tue Feb 02 1300 00:18:59 GMT+0918 (JST)
@@ -54,8 +87,22 @@ export class ReferenceWithTimezone {
         }
 
         const currentTimezoneOffset = -date.getTimezoneOffset();
-        const targetTimezoneOffset = overrideTimezoneOffset ?? this.timezoneOffset ?? currentTimezoneOffset;
+        let targetTimezoneOffset = overrideTimezoneOffset ?? this.timezoneOffset ?? currentTimezoneOffset;
+        if (
+            resolveTimezoneAtTargetDate &&
+            overrideTimezoneOffset == null &&
+            this.isDaylightSavingDependentReference()
+        ) {
+            targetTimezoneOffset = toTimezoneOffset(this.timezoneAbbr, date, this.timezoneOverrides);
+        }
         return currentTimezoneOffset - targetTimezoneOffset;
+    }
+
+    private isDaylightSavingDependentReference(): boolean {
+        return (
+            this.timezoneAbbr != null &&
+            isAmbiguousTimezoneAbbreviation(this.timezoneAbbr, this.timezoneOverrides ?? {})
+        );
     }
 
     getTimezoneOffset(): number {
@@ -102,6 +149,7 @@ export class ParsingComponents implements ParsedComponents {
             assignSimilarTime(components, date);
             assignSimilarDate(components, date);
             components.assign("timezoneOffset", reference.getTimezoneOffset());
+            components.addTag(TAG_RELATIVE_TIMEZONE_OFFSET);
         } else {
             implySimilarTime(components, date);
             components.imply("timezoneOffset", reference.getTimezoneOffset());
@@ -188,6 +236,13 @@ export class ParsingComponents implements ParsedComponents {
             this.imply("second", date.getSeconds());
             this.imply("minute", date.getMinutes());
             this.imply("hour", date.getHours());
+
+            // A time duration is an elapsed duration from the reference instant, so the reference
+            // instant's timezone offset still applies (even if the result crosses a DST transition).
+            if (!this.isCertain("timezoneOffset") && this.get("timezoneOffset") == null) {
+                this.imply("timezoneOffset", this.reference.getTimezoneOffset());
+            }
+            this.addTag(TAG_RELATIVE_TIMEZONE_OFFSET);
         }
         return this;
     }
@@ -206,6 +261,7 @@ export class ParsingComponents implements ParsedComponents {
         const component = new ParsingComponents(this.reference);
         component.knownValues = {};
         component.impliedValues = {};
+        component._tags = new Set(this._tags);
 
         for (const key in this.knownValues) {
             component.knownValues[key as Component] = this.knownValues[key as Component];
@@ -262,7 +318,15 @@ export class ParsingComponents implements ParsedComponents {
 
     date(): Date {
         const date = this.dateWithoutTimezoneAdjustment();
-        const timezoneAdjustment = this.reference.getSystemTimezoneAdjustmentMinute(date, this.get("timezoneOffset"));
+        // For calendar-date components (e.g. "tomorrow at 10am", "Sunday 9am"), a daylight-saving
+        // dependent reference timezone (e.g. ET, CET) is resolved at the component's own date.
+        // Relative-time components (e.g. "in 3 hours") keep the reference instant's offset.
+        const resolveAtTargetDate = !this._tags.has(TAG_RELATIVE_TIMEZONE_OFFSET);
+        const timezoneAdjustment = this.reference.getSystemTimezoneAdjustmentMinute(
+            date,
+            this.get("timezoneOffset"),
+            resolveAtTargetDate
+        );
         return new Date(date.getTime() + timezoneAdjustment * 60000);
     }
 

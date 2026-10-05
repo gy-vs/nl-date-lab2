@@ -1,4 +1,4 @@
-import { TimezoneAbbrMap, Weekday, Month } from "./types";
+import { AmbiguousTimezoneMap, TimezoneAbbrMap, Weekday, Month } from "./types";
 
 export const TIMEZONE_ABBR_MAP: TimezoneAbbrMap = {
     ACDT: 630,
@@ -270,6 +270,44 @@ export function getLastWeekdayOfMonth(year: number, month: Month, weekday: Weekd
 }
 
 /**
+ * Find the timezone definition for the given timezone input. Look for it in the following order:
+ * timezoneOverrides -> {@link TIMEZONE_ABBR_MAP}.
+ *
+ * @param timezoneInput Uppercase timezone abbreviation
+ * @param timezoneOverrides Overrides for timezones
+ * @return The timezone definition (either a fixed offset in minutes or a DST-dependent one), or null when not found
+ */
+export function findTimezoneDefinition(
+    timezoneInput?: string,
+    timezoneOverrides: TimezoneAbbrMap = {}
+): number | AmbiguousTimezoneMap | null {
+    if (timezoneInput == null) {
+        return null;
+    }
+
+    return timezoneOverrides[timezoneInput] ?? TIMEZONE_ABBR_MAP[timezoneInput] ?? null;
+}
+
+/**
+ * Returns whether the given timezone input is a daylight-saving dependent timezone abbreviation
+ * (e.g. ET, CET) under the given timezone overrides. Numeric offsets and fixed-offset abbreviations
+ * (e.g. PST, EST) are never ambiguous.
+ *
+ * @param timezoneInput Uppercase timezone abbreviation
+ * @param timezoneOverrides Overrides for timezones
+ */
+export function isAmbiguousTimezoneAbbreviation(
+    timezoneInput?: string,
+    timezoneOverrides: TimezoneAbbrMap = {}
+): boolean {
+    if (typeof timezoneInput !== "string") {
+        return false;
+    }
+
+    return typeof findTimezoneDefinition(timezoneInput, timezoneOverrides) === "object";
+}
+
+/**
  * Finds and returns timezone offset. If timezoneInput is numeric, it is returned. Otherwise, look for timezone offsets
  * in the following order: timezoneOverrides -> {@link TIMEZONE_ABBR_MAP}.
  *
@@ -291,7 +329,7 @@ export function toTimezoneOffset(
         return timezoneInput;
     }
 
-    const matchedTimezone = timezoneOverrides[timezoneInput] ?? TIMEZONE_ABBR_MAP[timezoneInput];
+    const matchedTimezone = findTimezoneDefinition(timezoneInput, timezoneOverrides);
     if (matchedTimezone == null) {
         return null;
     }
