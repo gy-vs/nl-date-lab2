@@ -1,4 +1,4 @@
-import { TimezoneAbbrMap, Weekday, Month } from "./types";
+import { AmbiguousTimezoneMap, TimezoneAbbrMap, Weekday, Month } from "./types";
 
 export const TIMEZONE_ABBR_MAP: TimezoneAbbrMap = {
     ACDT: 630,
@@ -270,19 +270,19 @@ export function getLastWeekdayOfMonth(year: number, month: Month, weekday: Weekd
 }
 
 /**
- * Finds and returns timezone offset. If timezoneInput is numeric, it is returned. Otherwise, look for timezone offsets
- * in the following order: timezoneOverrides -> {@link TIMEZONE_ABBR_MAP}.
+ * Find the timezone definition (either a fixed offset or an ambiguous DST-dependent one)
+ * mapped to the given abbreviation.
+ * Look for the definition in the following order: timezoneOverrides -> {@link TIMEZONE_ABBR_MAP}.
  *
  * @param timezoneInput Uppercase timezone abbreviation or numeric offset in minutes
- * @param date The date to use to determine whether to return DST offsets for ambiguous timezones
  * @param timezoneOverrides Overrides for timezones
- * @return timezone offset in minutes
+ * @return The matched timezone definition, or null if not found
+ * @internal
  */
-export function toTimezoneOffset(
+export function getTimezoneDefinition(
     timezoneInput?: string | number,
-    date?: Date,
     timezoneOverrides: TimezoneAbbrMap = {}
-): number | null {
+): number | AmbiguousTimezoneMap | null {
     if (timezoneInput == null) {
         return null;
     }
@@ -291,7 +291,53 @@ export function toTimezoneOffset(
         return timezoneInput;
     }
 
-    const matchedTimezone = timezoneOverrides[timezoneInput] ?? TIMEZONE_ABBR_MAP[timezoneInput];
+    return timezoneOverrides[timezoneInput] ?? TIMEZONE_ABBR_MAP[timezoneInput] ?? null;
+}
+
+/**
+ * Resolves a timezone definition (either a fixed offset or an ambiguous DST-dependent one) into an
+ * offset for the given wall-clock date.
+ *
+ * @param matchedTimezone A fixed numeric offset or an {@link AmbiguousTimezoneMap}
+ * @param date The wall-clock date to use to determine whether to return DST offsets for ambiguous timezones
+ * @return timezone offset in minutes
+ * @internal
+ */
+export function resolveTimezoneOffset(matchedTimezone: number | AmbiguousTimezoneMap, date?: Date): number {
+    // This means that we have matched an unambiguous timezone
+    if (typeof matchedTimezone == "number") {
+        return matchedTimezone;
+    }
+
+    // Without a wall-clock date as context, fall back to the non-DST offset.
+    if (date == null) {
+        return matchedTimezone.timezoneOffsetNonDst;
+    }
+
+    // Return DST offset if the wall-clock date is during daylight savings
+    if (date > matchedTimezone.dstStart(date.getFullYear()) && !(date > matchedTimezone.dstEnd(date.getFullYear()))) {
+        return matchedTimezone.timezoneOffsetDuringDst;
+    }
+
+    // The wall-clock date is not during DST => return non-DST offset
+    return matchedTimezone.timezoneOffsetNonDst;
+}
+
+/**
+ * Finds and returns timezone offset. If timezoneInput is numeric, it is returned. Otherwise, look for timezone offsets
+ * in the following order: timezoneOverrides -> {@link TIMEZONE_ABBR_MAP}.
+ *
+ * @param timezoneInput Uppercase timezone abbreviation or numeric offset in minutes
+ * @param date The wall-clock date to use to determine whether to return DST offsets for ambiguous timezones
+ * @param timezoneOverrides Overrides for timezones
+ * @return timezone offset in minutes
+ */
+export function toTimezoneOffset(
+    timezoneInput?: string | number,
+    date?: Date,
+    timezoneOverrides: TimezoneAbbrMap = {}
+): number | null {
+    const matchedTimezone = getTimezoneDefinition(timezoneInput, timezoneOverrides);
     if (matchedTimezone == null) {
         return null;
     }
@@ -300,19 +346,12 @@ export function toTimezoneOffset(
         return matchedTimezone;
     }
 
-    // The matched timezone is an ambiguous timezone, where the offset depends on whether the context (refDate)
+    // The matched timezone is an ambiguous timezone, where the offset depends on whether the wall-clock date
     // is during daylight savings or not.
-
-    // Without refDate as context, there's no way to know if DST or non-DST offset should be used. Return null instead.
+    // Without a wall-clock date as context, there's no way to know if DST or non-DST offset should be used. Return null instead.
     if (date == null) {
         return null;
     }
 
-    // Return DST offset if the refDate is during daylight savings
-    if (date > matchedTimezone.dstStart(date.getFullYear()) && !(date > matchedTimezone.dstEnd(date.getFullYear()))) {
-        return matchedTimezone.timezoneOffsetDuringDst;
-    }
-
-    // refDate is not during DST => return non-DST offset
-    return matchedTimezone.timezoneOffsetNonDst;
+    return resolveTimezoneOffset(matchedTimezone, date);
 }

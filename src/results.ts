@@ -1,9 +1,16 @@
-import { Component, ParsedComponents, ParsedResult, ParsingReference, TimezoneAbbrMap } from "./types";
+import {
+    AmbiguousTimezoneMap,
+    Component,
+    ParsedComponents,
+    ParsedResult,
+    ParsingReference,
+    TimezoneAbbrMap,
+} from "./types";
 
 import quarterOfYear from "dayjs/plugin/quarterOfYear";
 import dayjs, { QUnitType } from "dayjs";
 import { assignSimilarDate, assignSimilarTime, implySimilarTime } from "./utils/dates";
-import { toTimezoneOffset } from "./timezone";
+import { getTimezoneDefinition, resolveTimezoneOffset, toTimezoneOffset } from "./timezone";
 import { addDuration, Duration, EmptyDuration } from "./calculation/duration";
 dayjs.extend(quarterOfYear);
 
@@ -11,9 +18,19 @@ export class ReferenceWithTimezone {
     readonly instant: Date;
     readonly timezoneOffset?: number | null;
 
-    constructor(instant?: Date, timezoneOffset?: number) {
+    /**
+     * The definition of the reference timezone (a fixed offset or a DST-dependent one).
+     * Unlike {@link timezoneOffset} (which is resolved once against the reference instant), this is kept so
+     * that DST-dependent abbreviations can be resolved again against each parsed wall-clock date.
+     *
+     * @internal
+     */
+    readonly timezoneDefinition?: number | AmbiguousTimezoneMap | null;
+
+    constructor(instant?: Date, timezoneOffset?: number, timezoneDefinition?: number | AmbiguousTimezoneMap | null) {
         this.instant = instant ?? new Date();
         this.timezoneOffset = timezoneOffset ?? null;
+        this.timezoneDefinition = timezoneDefinition ?? null;
     }
 
     static fromDate(date: Date): ReferenceWithTimezone {
@@ -25,8 +42,21 @@ export class ReferenceWithTimezone {
             return ReferenceWithTimezone.fromDate(input);
         }
         const instant: Date = input?.instant ?? new Date();
-        const timezoneOffset = toTimezoneOffset(input?.timezone, instant, timezoneOverrides);
-        return new ReferenceWithTimezone(instant, timezoneOffset);
+        const timezoneInput = input?.timezone;
+        const timezoneOffset = toTimezoneOffset(timezoneInput, instant, timezoneOverrides);
+        // Remember the timezone definition itself. For DST-dependent abbreviations (e.g. "ET", "CET")
+        // the offset is later re-resolved against each parsed wall-clock date instead of being frozen
+        // at the reference instant's offset. Numeric references keep their fixed-offset behavior.
+        const timezoneDefinition = getTimezoneDefinition(timezoneInput, timezoneOverrides);
+        return new ReferenceWithTimezone(instant, timezoneOffset, timezoneDefinition);
+    }
+
+    /** @internal */
+    getTimezoneOffsetForWallDate(date: Date): number {
+        if (this.timezoneDefinition != null) {
+            return resolveTimezoneOffset(this.timezoneDefinition, date);
+        }
+        return this.getTimezoneOffset();
     }
 
     /**
@@ -68,6 +98,15 @@ export class ParsingComponents implements ParsedComponents {
     private impliedValues: { [c in Component]?: number };
     private reference: ReferenceWithTimezone;
     private _tags = new Set<string>();
+
+    /**
+     * The definition of the timezone explicitly mentioned in the text (e.g. "ET", "CET") for these components.
+     * When set, the {@link timezoneOffset} is resolved against each component's own wall-clock date,
+     * so DST-dependent abbreviations get the correct offset on both sides of a DST transition.
+     *
+     * @internal
+     */
+    private timezoneDefinition?: number | AmbiguousTimezoneMap | null;
 
     constructor(reference: ReferenceWithTimezone, knownComponents?: { [c in Component]?: number }) {
         this.reference = reference;
@@ -206,6 +245,7 @@ export class ParsingComponents implements ParsedComponents {
         const component = new ParsingComponents(this.reference);
         component.knownValues = {};
         component.impliedValues = {};
+        component.timezoneDefinition = this.timezoneDefinition;
 
         for (const key in this.knownValues) {
             component.knownValues[key as Component] = this.knownValues[key as Component];
@@ -260,9 +300,41 @@ export class ParsingComponents implements ParsedComponents {
         return dayjs(this.dateWithoutTimezoneAdjustment());
     }
 
+    /**
+     * Remember that these components were explicitly qualified with a named timezone
+     * (e.g. "ET", "CET"). The offset will be resolved against the components' own wall-clock date.
+     * @internal
+     */
+    assignTimezoneDefinition(timezoneDefinition: number | AmbiguousTimezoneMap) {
+        this.timezoneDefinition = timezoneDefinition;
+    }
+
+    /**
+     * @return The named timezone definition attached to these components (if any).
+     * @internal
+     */
+    getTimezoneDefinition(): number | AmbiguousTimezoneMap | null {
+        return this.timezoneDefinition ?? null;
+    }
+
     date(): Date {
         const date = this.dateWithoutTimezoneAdjustment();
-        const timezoneAdjustment = this.reference.getSystemTimezoneAdjustmentMinute(date, this.get("timezoneOffset"));
+
+        let timezoneOffset = this.get("timezoneOffset");
+        if (this.timezoneDefinition != null) {
+            // A named, potentially DST-dependent, timezone was mentioned in the text.
+            // Resolve the offset against this component's own wall-clock date, rather than trusting the
+            // stored offset (which may have been resolved against another date, e.g. the other end of a range).
+            timezoneOffset = resolveTimezoneOffset(this.timezoneDefinition, date);
+        } else if (timezoneOffset == null && this.reference.timezoneDefinition != null) {
+            // No timezone was mentioned in the text, but the reference was given by a named timezone
+            // (e.g. reference timezone "ET"). Resolve it against this component's own wall-clock date.
+            // Component-level numeric offsets (e.g. ISO formats, "GMT+0900", duration-based results)
+            // take precedence and keep their original, fixed-offset behavior.
+            timezoneOffset = this.reference.getTimezoneOffsetForWallDate(date);
+        }
+
+        const timezoneAdjustment = this.reference.getSystemTimezoneAdjustmentMinute(date, timezoneOffset ?? undefined);
         return new Date(date.getTime() + timezoneAdjustment * 60000);
     }
 

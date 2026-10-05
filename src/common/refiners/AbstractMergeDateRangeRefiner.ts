@@ -1,10 +1,12 @@
 /*
-  
+
 */
 
 import { ParsingResult } from "../../results";
+import { AmbiguousTimezoneMap } from "../../types";
 import { MergingRefiner } from "../abstractRefiners";
 import { addDuration } from "../../calculation/duration";
+import { resolveTimezoneOffset } from "../../timezone";
 
 export default abstract class AbstractMergeDateRangeRefiner extends MergingRefiner {
     abstract patternBetween(): RegExp;
@@ -51,6 +53,23 @@ export default abstract class AbstractMergeDateRangeRefiner extends MergingRefin
                 [toResult, fromResult] = [fromResult, toResult];
             }
         }
+
+        // When the trailing timezone abbreviation (e.g. "March 9 10pm to March 10 10am ET") was extracted
+        // before the range was merged, only one side has the timezone definition/offset. Propagate the
+        // definition to both sides and resolve the offset against each side's own wall-clock date,
+        // so DST-dependent abbreviations get the correct offset even when the range crosses a DST change.
+        const timezoneDefinition: number | AmbiguousTimezoneMap | null =
+            fromResult.start.getTimezoneDefinition() ?? toResult.start.getTimezoneDefinition();
+        if (timezoneDefinition != null) {
+            [fromResult.start, toResult.start].forEach((components) => {
+                if (components.getTimezoneDefinition() == null && !components.isCertain("timezoneOffset")) {
+                    const wallDate = components.dayjs().toDate();
+                    components.imply("timezoneOffset", resolveTimezoneOffset(timezoneDefinition, wallDate));
+                    components.assignTimezoneDefinition(timezoneDefinition);
+                }
+            });
+        }
+
         const result = fromResult.clone();
         result.start = fromResult.start;
         result.end = toResult.start;
